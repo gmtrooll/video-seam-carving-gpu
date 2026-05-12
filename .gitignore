@@ -1,5 +1,18 @@
 .DS_Store
 
+# Video files (too large for git)
+input/
+output/
+results/
+
+# Compiled binary
+v2_jnd
+v2_jnd.exe
+
+# Python
+__pycache__/
+*.pyc
+
 # Compiled Object files
 *.slo
 *.lo
