@@ -294,11 +294,11 @@ static void carveFrameJND(
         dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
         sobelSaliencyKernel<<<grid, block>>>(d_modGrayA, d_grayA, d_imgA, d_motionA, d_saliency, width, height, skinBias, motionWeight);
 
-        // Debug: dump the JND energy map as an image (once)
+        // Debug: dump saliency/energy map (once)
         {
-            static bool dumpedEnergyMap = false;
-            if (!dumpedEnergyMap) {
-                dumpedEnergyMap = true;
+            static bool dumpedSaliency = false;
+            if (!dumpedSaliency) {
+                dumpedSaliency = true;
                 vector<float> h_sal(width * height);
                 CUDA_CHECK(cudaMemcpy(h_sal.data(), d_saliency, (size_t)width * height * sizeof(float), cudaMemcpyDeviceToHost));
                 float maxVal = *max_element(h_sal.begin(), h_sal.end());
@@ -306,8 +306,8 @@ static void carveFrameJND(
                 Mat energyImg(height, width, CV_8UC1);
                 for (int i = 0; i < width * height; i++)
                     energyImg.data[i] = (unsigned char)(min(h_sal[i] / maxVal, 1.0f) * 255.0f);
-                imwrite("debug_energy_map.png", energyImg);
-                fprintf(stderr, "[DEBUG] Saved JND energy map to debug_energy_map.png (%dx%d)\n", width, height);
+                imwrite("debug_v2_saliency.png", energyImg);
+                fprintf(stderr, "[DEBUG] debug_v2_saliency.png\n");
             }
         }
 
@@ -467,6 +467,91 @@ int main(int argc, char* argv[])
         initOrigIdxKernel<<<grid, block>>>(d_origIdxA, curW, curH);
         combinedJndKernel<<<grid, block>>>(d_jndSpatial, d_jndTemporal, d_jnd, curW, curH);
         modifiedIntensityKernel<<<grid, block>>>(d_grayA, d_jnd, d_origIdxA, d_modGrayA, curW, origW, curH, lambda);
+
+        // Debug: dump all pipeline stages as images (first frame only)
+        if (debugDump && f == 2) {
+            size_t npix = (size_t)curW * curH;
+
+            // 1. Grayscale
+            {
+                vector<unsigned char> h_buf(npix);
+                CUDA_CHECK(cudaMemcpy(h_buf.data(), d_grayA, npix, cudaMemcpyDeviceToHost));
+                Mat img(curH, curW, CV_8UC1, h_buf.data());
+                imwrite("debug_v2_gray.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_gray.png\n");
+            }
+
+            // 2. Spatial JND
+            {
+                vector<float> h_buf(npix);
+                CUDA_CHECK(cudaMemcpy(h_buf.data(), d_jndSpatial, npix * sizeof(float), cudaMemcpyDeviceToHost));
+                float mx = *max_element(h_buf.begin(), h_buf.end());
+                if (mx < 1e-6f) mx = 1.0f;
+                Mat img(curH, curW, CV_8UC1);
+                for (size_t i = 0; i < npix; i++) img.data[i] = (uchar)(min(h_buf[i]/mx, 1.0f)*255);
+                imwrite("debug_v2_jnd_spatial.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_jnd_spatial.png\n");
+            }
+
+            // 3. Temporal JND
+            {
+                vector<float> h_buf(npix);
+                CUDA_CHECK(cudaMemcpy(h_buf.data(), d_jndTemporal, npix * sizeof(float), cudaMemcpyDeviceToHost));
+                float mx = *max_element(h_buf.begin(), h_buf.end());
+                if (mx < 1e-6f) mx = 1.0f;
+                Mat img(curH, curW, CV_8UC1);
+                for (size_t i = 0; i < npix; i++) img.data[i] = (uchar)(min(h_buf[i]/mx, 1.0f)*255);
+                imwrite("debug_v2_jnd_temporal.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_jnd_temporal.png\n");
+            }
+
+            // 4. Combined JND
+            {
+                vector<float> h_buf(npix);
+                CUDA_CHECK(cudaMemcpy(h_buf.data(), d_jnd, npix * sizeof(float), cudaMemcpyDeviceToHost));
+                float mx = *max_element(h_buf.begin(), h_buf.end());
+                if (mx < 1e-6f) mx = 1.0f;
+                Mat img(curH, curW, CV_8UC1);
+                for (size_t i = 0; i < npix; i++) img.data[i] = (uchar)(min(h_buf[i]/mx, 1.0f)*255);
+                imwrite("debug_v2_jnd.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_jnd.png\n");
+            }
+
+            // 5. Modified (flattened) grayscale
+            {
+                vector<float> h_buf(npix);
+                CUDA_CHECK(cudaMemcpy(h_buf.data(), d_modGrayA, npix * sizeof(float), cudaMemcpyDeviceToHost));
+                Mat img(curH, curW, CV_8UC1);
+                for (size_t i = 0; i < npix; i++) img.data[i] = (uchar)min(255.0f, max(0.0f, h_buf[i]));
+                imwrite("debug_v2_modgray.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_modgray.png\n");
+            }
+
+            // 6. Diff mask: original vs flattened (red = changed)
+            {
+                vector<unsigned char> h_gray(npix);
+                vector<float> h_mod(npix);
+                CUDA_CHECK(cudaMemcpy(h_gray.data(), d_grayA, npix, cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_mod.data(), d_modGrayA, npix * sizeof(float), cudaMemcpyDeviceToHost));
+                Mat img(curH, curW, CV_8UC3);
+                for (size_t i = 0; i < npix; i++) {
+                    float diff = fabsf((float)h_gray[i] - h_mod[i]);
+                    if (diff > 1.0f) {
+                        img.data[i*3+0] = 0;
+                        img.data[i*3+1] = 0;
+                        img.data[i*3+2] = (uchar)min(255.0f, diff * 10.0f);
+                    } else {
+                        img.data[i*3+0] = h_gray[i];
+                        img.data[i*3+1] = h_gray[i];
+                        img.data[i*3+2] = h_gray[i];
+                    }
+                }
+                imwrite("debug_v2_diff_mask.png", img);
+                fprintf(stderr, "[DEBUG] debug_v2_diff_mask.png\n");
+            }
+
+            fprintf(stderr, "[DEBUG] All pipeline images saved.\n");
+        }
 
         CUDA_CHECK(cudaMemcpy(d_origGray, d_grayA, (size_t)curW * curH, cudaMemcpyDeviceToDevice));
 

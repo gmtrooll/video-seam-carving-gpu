@@ -13,6 +13,9 @@ v2_jnd.exe
 __pycache__/
 *.pyc
 
+# Debug output images
+debug_*.png
+
 # Compiled Object files
 *.slo
 *.lo
